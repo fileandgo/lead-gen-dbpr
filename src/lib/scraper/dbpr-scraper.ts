@@ -25,8 +25,9 @@ export async function runScrape(options: ScrapeOptions): Promise<void> {
     });
 
     browser = await chromium.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      headless: false,
+      channel: 'chromium',
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'],
     });
 
     let totalRaw = 0;
@@ -36,7 +37,7 @@ export async function runScrape(options: ScrapeOptions): Promise<void> {
       const count = await scrapeForLicenseType(browser, runId, county, licenseType);
       totalRaw += count;
       console.log(`[Scraper] Found ${count} records for ${licenseType}`);
-      await sleep(2000); // Be polite between searches
+      await sleep(2000);
     }
 
     // Deduplicate
@@ -84,22 +85,35 @@ async function scrapeForLicenseType(
   let totalRecords = 0;
 
   try {
-    // Step 1: Navigate to DBPR
-    await navigateToSearch(page);
+    // Step 1: Navigate to DBPR search page
+    console.log('[Scraper] Step 1: Navigating to DBPR...');
+    await page.goto(`${DBPR_BASE_URL}/wl11.asp?mode=0&SID=`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 30000,
+    });
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+    await captureScreenshot(page, `step1-landing`);
 
-    // Step 2: Select "Search by City or County"
-    await selectSearchByCounty(page);
+    // Step 2: Select "Search by City or County" radio and submit
+    console.log('[Scraper] Step 2: Selecting "Search by City or County"...');
+    await navigateToCountyForm(page);
+    await captureScreenshot(page, `step2-county-form`);
 
-    // Step 3: Fill in the search form
+    // Step 3: Fill the search form
+    console.log('[Scraper] Step 3: Filling search form...');
     await fillSearchForm(page, county, licenseType);
+    await captureScreenshot(page, `step3-filled`);
 
-    // Step 4: Submit search
+    // Step 4: Submit the search
+    console.log('[Scraper] Step 4: Submitting search...');
     await submitSearch(page);
+    await captureScreenshot(page, `step4-results`);
 
     // Step 5: Parse all pages of results
+    console.log('[Scraper] Step 5: Parsing results...');
     totalRecords = await scrapeAllPages(page, runId, county, licenseType);
   } catch (error) {
-    await captureScreenshot(page, `error-${runId}-${licenseType}`);
+    await captureScreenshot(page, `error-${licenseType}`);
     throw error;
   } finally {
     await context.close();
@@ -108,190 +122,116 @@ async function scrapeForLicenseType(
   return totalRecords;
 }
 
-async function navigateToSearch(page: Page): Promise<void> {
-  // Try the direct search URL first
-  await page.goto(`${DBPR_BASE_URL}/wl11.asp?mode=0&SID=`, {
-    waitUntil: 'domcontentloaded',
-    timeout: 30000,
-  });
+/**
+ * Select the "Search by City or County" radio button and submit the form
+ * to navigate to the county search page.
+ *
+ * Radio button values on DBPR:
+ *   Name, LicNbr, City (=City or County), LicTyp
+ */
+async function navigateToCountyForm(page: Page): Promise<void> {
+  // Click the "City" radio button (which is "Search by City or County")
+  const radioSelector = 'input[type="radio"][name="SearchType"][value="City"]';
+  await page.waitForSelector(radioSelector, { timeout: 10000 });
+  await page.click(radioSelector);
+  console.log('[Scraper] Clicked "City" radio button');
+  await sleep(300);
 
-  // Wait for the page to be interactive
-  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+  // Click the Search button to navigate to the county form
+  await page.click('button[name="SelectSearchType"]');
+  await page.waitForLoadState('networkidle', { timeout: 20000 });
+  console.log('[Scraper] Navigated to county search form');
+  await sleep(1000);
 
-  // Check if we landed on the search options page
-  const searchTypeVisible = await page
-    .locator('text=Select Search Type')
-    .isVisible()
-    .catch(() => false);
-
-  if (!searchTypeVisible) {
-    // Try navigating from the main page
-    await page.goto(DBPR_BASE_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-
-    // Look for the Online Services or Licensee Search link
-    const searchLink = page.locator('a:has-text("Licensee Search"), a:has-text("LICENSEE SEARCH")');
-    if (await searchLink.isVisible().catch(() => false)) {
-      await searchLink.first().click();
-      await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-    }
+  // Verify we're on the county form by checking for County dropdown
+  const hasCountyDropdown = await page.locator('select[name="County"]').isVisible().catch(() => false);
+  if (!hasCountyDropdown) {
+    throw new Error('Failed to navigate to county search form - County dropdown not found');
   }
+  console.log('[Scraper] Confirmed: on county search form');
 }
 
-async function selectSearchByCounty(page: Page): Promise<void> {
-  // Look for the "Search by City or County" radio button
-  const radioSelectors = [
-    'input[type="radio"][value*="County"]',
-    'input[type="radio"][value*="county"]',
-    'input[type="radio"][value="2"]', // Often the 3rd option (0-indexed)
-  ];
-
-  for (const selector of radioSelectors) {
-    const radio = page.locator(selector);
-    if (await radio.isVisible().catch(() => false)) {
-      await radio.click();
-      await sleep(500);
-
-      // Click the Search button to proceed to the form
-      const searchBtn = page.locator('input[type="submit"][value="Search"], button:has-text("Search")');
-      if (await searchBtn.isVisible().catch(() => false)) {
-        await searchBtn.first().click();
-        await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-      }
-      return;
-    }
-  }
-
-  // Try clicking the text directly
-  const countyOption = page.locator('text=Search by City or County');
-  if (await countyOption.isVisible().catch(() => false)) {
-    await countyOption.click();
-    await sleep(500);
-
-    const searchBtn = page.locator('input[type="submit"][value="Search"], button:has-text("Search")');
-    if (await searchBtn.isVisible().catch(() => false)) {
-      await searchBtn.first().click();
-      await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-    }
-    return;
-  }
-
-  // If we're already on the county search form, continue
-  const licenseCategory = page.locator('select[name*="Category"], select[name*="category"]');
-  if (await licenseCategory.isVisible().catch(() => false)) {
-    return;
-  }
-
-  throw new Error('Could not find "Search by City or County" option on the page');
-}
-
+/**
+ * Fill in the county search form fields.
+ *
+ * Field names: Board, LicenseType, City, County, State, SpecQual, RecsPerPage
+ * Board change triggers page reload to populate LicenseType.
+ */
 async function fillSearchForm(page: Page, county: string, licenseType: string): Promise<void> {
-  // Wait for the form to load
-  await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+  // 1. Select License Category (Board) = "Construction Industry" (value "06")
+  //    This triggers a page reload to populate LicenseType dropdown
+  console.log('[Scraper] Selecting Board = Construction Industry...');
+  await page.selectOption('select[name="Board"]', '06');
+  await page.waitForLoadState('networkidle', { timeout: 20000 });
+  await sleep(2000);
+  console.log('[Scraper] Board selected, page reloaded');
 
-  // Select License Category = Construction Industry
-  const categorySelect = page.locator(
-    'select[name*="Category"], select[name*="category"], select[name="SID1"]'
-  ).first();
+  // 2-5: Set remaining fields directly via evaluate WITHOUT triggering change events
+  //      (DBPR onchange handlers auto-submit the form, causing unwanted navigation)
+  const formResult = await page.evaluate((args: { licenseType: string; county: string }) => {
+    const results: string[] = [];
 
-  if (await categorySelect.isVisible().catch(() => false)) {
-    await categorySelect.selectOption({ label: LICENSE_CATEGORY }).catch(async () => {
-      // Try by partial text match
-      const options = await categorySelect.locator('option').all();
-      for (const opt of options) {
-        const text = await opt.textContent();
-        if (text && text.includes('Construction')) {
-          const val = await opt.getAttribute('value');
-          if (val) await categorySelect.selectOption(val);
-          break;
-        }
+    // License Type
+    const licTypeSel = document.querySelector('select[name="LicenseType"]') as HTMLSelectElement;
+    if (licTypeSel) {
+      const match = Array.from(licTypeSel.options).find(o => o.text.trim() === args.licenseType);
+      if (match) {
+        licTypeSel.value = match.value;
+        results.push(`LicenseType=${match.value}`);
+      } else {
+        results.push(`LicenseType=NOT_FOUND`);
       }
-    });
-
-    // Wait for dependent dropdowns to load
-    await sleep(2000);
-    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
-  }
-
-  // Select License Type
-  const typeSelect = page.locator(
-    'select[name*="Type"], select[name*="type"], select[name="SID2"]'
-  ).first();
-
-  if (await typeSelect.isVisible().catch(() => false)) {
-    await typeSelect.selectOption({ label: licenseType }).catch(async () => {
-      const options = await typeSelect.locator('option').all();
-      for (const opt of options) {
-        const text = await opt.textContent();
-        if (text && text.trim() === licenseType) {
-          const val = await opt.getAttribute('value');
-          if (val) await typeSelect.selectOption(val);
-          break;
-        }
-      }
-    });
-  }
-
-  // Select County
-  const countySelect = page.locator(
-    'select[name*="County"], select[name*="county"], select[name="SID5"]'
-  ).first();
-
-  if (await countySelect.isVisible().catch(() => false)) {
-    await countySelect.selectOption({ label: county }).catch(async () => {
-      const options = await countySelect.locator('option').all();
-      for (const opt of options) {
-        const text = await opt.textContent();
-        if (text && text.trim().toLowerCase() === county.toLowerCase()) {
-          const val = await opt.getAttribute('value');
-          if (val) await countySelect.selectOption(val);
-          break;
-        }
-      }
-    });
-  }
-
-  // Select State = Florida
-  const stateSelect = page.locator(
-    'select[name*="State"], select[name*="state"], select[name="SID6"]'
-  ).first();
-
-  if (await stateSelect.isVisible().catch(() => false)) {
-    await stateSelect.selectOption({ label: 'Florida' }).catch(async () => {
-      await stateSelect.selectOption({ value: 'FL' }).catch(() => {});
-    });
-  }
-
-  // Set Licenses Per Page to maximum
-  const perPageSelect = page.locator(
-    'select[name*="PerPage"], select[name*="perpage"], select[name*="per_page"]'
-  ).first();
-
-  if (await perPageSelect.isVisible().catch(() => false)) {
-    const options = await perPageSelect.locator('option').all();
-    if (options.length > 0) {
-      // Select the last (largest) option
-      const lastOpt = options[options.length - 1];
-      const val = await lastOpt.getAttribute('value');
-      if (val) await perPageSelect.selectOption(val);
     }
+
+    // County
+    const countySel = document.querySelector('select[name="County"]') as HTMLSelectElement;
+    if (countySel) {
+      const match = Array.from(countySel.options).find(
+        o => o.text.trim().toLowerCase() === args.county.toLowerCase()
+      );
+      if (match) {
+        countySel.value = match.value;
+        results.push(`County=${match.value}`);
+      } else {
+        results.push(`County=NOT_FOUND`);
+      }
+    }
+
+    // State = Florida
+    const stateSel = document.querySelector('select[name="State"]') as HTMLSelectElement;
+    if (stateSel) {
+      stateSel.value = 'FL';
+      results.push('State=FL');
+    }
+
+    // Records per page = 50
+    const recsSel = document.querySelector('select[name="RecsPerPage"]') as HTMLSelectElement;
+    if (recsSel) {
+      recsSel.value = '50';
+      results.push('RecsPerPage=50');
+    }
+
+    return results;
+  }, { licenseType, county });
+
+  console.log(`[Scraper] Form fields set: ${formResult.join(', ')}`);
+
+  if (formResult.some(r => r.includes('NOT_FOUND'))) {
+    throw new Error(`Form field not found: ${formResult.filter(r => r.includes('NOT_FOUND')).join(', ')}`);
   }
 }
 
+/**
+ * Submit the search form and wait for results
+ */
 async function submitSearch(page: Page): Promise<void> {
-  // Find and click the Search button
-  const searchBtn = page.locator(
-    'input[type="submit"][value="Search"], button:has-text("Search"), input[name*="Search"]'
-  ).first();
+  // The Search button: <button type="submit" name="..." value="Search">Search</button>
+  // or <input type="submit" value="Search">
+  const searchBtnSelector = 'button:has-text("Search"), input[value="Search"]';
 
-  if (await searchBtn.isVisible().catch(() => false)) {
-    await searchBtn.click();
-  } else {
-    throw new Error('Could not find Search button');
-  }
-
-  // Wait for results to load
-  await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+  await page.locator(searchBtnSelector).first().click();
+  await page.waitForLoadState('networkidle', { timeout: 30000 });
+  console.log('[Scraper] Search submitted');
   await sleep(2000);
 }
 
@@ -309,12 +249,8 @@ async function scrapeAllPages(
     console.log(`[Scraper] Parsing page ${currentPage}...`);
 
     // Check for "no results" message
-    const noResults = await page
-      .locator('text=No Records Found, text=0 Records')
-      .isVisible()
-      .catch(() => false);
-
-    if (noResults) {
+    const pageText = await page.evaluate(() => document.body.innerText);
+    if (pageText.includes('No Records Found') || pageText.includes('0 Records')) {
       console.log(`[Scraper] No results found for ${county} / ${licenseType}`);
       break;
     }
@@ -322,10 +258,16 @@ async function scrapeAllPages(
     const pageContent = await page.content();
     const records = parseResultsPage(pageContent, county, licenseType);
 
-    if (records.length === 0) {
-      console.log(`[Scraper] No records parsed on page ${currentPage}`);
+    if (records.length === 0 && currentPage === 1) {
+      console.log(`[Scraper] No records parsed on first page. Page text sample: ${pageText.substring(0, 500)}`);
       break;
     }
+
+    if (records.length === 0) {
+      break;
+    }
+
+    console.log(`[Scraper] Parsed ${records.length} records on page ${currentPage}`);
 
     // Save records to database
     for (const record of records) {
@@ -359,7 +301,6 @@ async function scrapeAllPages(
         });
         totalRecords++;
       } catch (error) {
-        // Skip duplicates silently
         if (!(error instanceof Error && error.message.includes('Unique constraint'))) {
           console.error(`[Scraper] Error saving record:`, error);
         }
@@ -370,51 +311,37 @@ async function scrapeAllPages(
     hasMorePages = await navigateToNextPage(page, currentPage);
     currentPage++;
 
-    // Safety limit
     if (currentPage > 500) {
       console.log(`[Scraper] Reached page limit (500), stopping`);
       break;
     }
 
-    await sleep(1500); // Be polite between pages
+    await sleep(1500);
   }
 
   return totalRecords;
 }
 
-async function navigateToNextPage(page: Page, currentPage: number): Promise<boolean> {
-  const nextPage = currentPage + 1;
-
-  // Look for page navigation links
-  // DBPR uses links like: <a href="javascript:...">2</a> or form-based pagination
-  const pageLinkSelectors = [
-    `a:has-text("${nextPage}")`,
-    `a[href*="Page=${nextPage}"]`,
-    `a[href*="page=${nextPage}"]`,
-    'a:has-text("Next")',
-    'a:has-text(">")',
-    `input[type="submit"][value="${nextPage}"]`,
-  ];
-
-  // First check if the total page info indicates more pages
-  const pageInfo = await page.locator('text=/Page \\d+ of \\d+/').textContent().catch(() => '');
-  if (pageInfo) {
-    const match = pageInfo.match(/Page\s+(\d+)\s+of\s+(\d+)/);
-    if (match) {
-      const current = parseInt(match[1]);
-      const total = parseInt(match[2]);
-      if (current >= total) return false;
-    }
+async function navigateToNextPage(page: Page, _currentPage: number): Promise<boolean> {
+  // Check pagination info
+  const pageText = await page.evaluate(() => document.body.innerText);
+  const pageMatch = pageText.match(/Page\s+(\d+)\s+of\s+(\d+)/);
+  if (pageMatch) {
+    const current = parseInt(pageMatch[1]);
+    const total = parseInt(pageMatch[2]);
+    console.log(`[Scraper] Pagination: page ${current} of ${total}`);
+    if (current >= total) return false;
+  } else {
+    return false;
   }
 
-  for (const selector of pageLinkSelectors) {
-    const link = page.locator(selector).first();
-    if (await link.isVisible().catch(() => false)) {
-      await link.click();
-      await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-      await sleep(1000);
-      return true;
-    }
+  // DBPR uses <button name="SearchForward" onclick="return ChangePage(4);"> for next page
+  const forwardBtn = page.locator('button[name="SearchForward"]');
+  if (await forwardBtn.isVisible().catch(() => false)) {
+    await forwardBtn.click();
+    await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+    await sleep(1500);
+    return true;
   }
 
   return false;
@@ -428,8 +355,6 @@ async function deduplicateRecords(runId: string, county: string): Promise<number
   const uniqueBusinesses = new Map<string, typeof rawLicenses[0]>();
 
   for (const raw of rawLicenses) {
-    // Dedup strategy 1: exact license number match
-    // Dedup strategy 2: normalized name + address
     const normName = normalizeBusinessName(raw.businessName);
     const normAddr = normalizeAddress(raw.addressLine1 || '');
     const key = `${normName}::${normAddr}`;
@@ -441,7 +366,7 @@ async function deduplicateRecords(runId: string, county: string): Promise<number
 
   let uniqueCount = 0;
 
-  for (const [, raw] of uniqueBusinesses) {
+  for (const raw of Array.from(uniqueBusinesses.values())) {
     const normName = normalizeBusinessName(raw.businessName);
     const normAddr = normalizeAddress(raw.addressLine1 || '');
 
@@ -470,7 +395,6 @@ async function deduplicateRecords(runId: string, county: string): Promise<number
         },
       });
 
-      // Link license to business
       await prisma.businessLicense.create({
         data: {
           businessId: business.id,
@@ -480,7 +404,7 @@ async function deduplicateRecords(runId: string, county: string): Promise<number
           status: raw.licenseStatus,
           expirationDate: raw.expirationDate,
         },
-      }).catch(() => {}); // Ignore if already linked
+      }).catch(() => {});
 
       uniqueCount++;
     } catch (error) {
@@ -496,7 +420,8 @@ async function captureScreenshot(page: Page, name: string): Promise<void> {
     if (!fs.existsSync(SCREENSHOT_DIR)) {
       fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
     }
-    const filename = `${name}-${Date.now()}.png`;
+    const safeName = name.replace(/[^a-zA-Z0-9-_]/g, '_');
+    const filename = `${safeName}-${Date.now()}.png`;
     await page.screenshot({ path: path.join(SCREENSHOT_DIR, filename), fullPage: true });
     console.log(`[Scraper] Screenshot saved: ${filename}`);
   } catch (e) {
