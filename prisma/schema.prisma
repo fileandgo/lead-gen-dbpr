@@ -1,0 +1,171 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model ScrapeRun {
+  id                   String       @id @default(cuid())
+  county               String
+  selectedLicenseTypes Json         @map("selected_license_types_json")
+  status               String       @default("pending")
+  totalRawRecords      Int          @default(0) @map("total_raw_records")
+  totalUniqueRecords   Int          @default(0) @map("total_unique_records")
+  startedAt            DateTime?    @map("started_at")
+  completedAt          DateTime?    @map("completed_at")
+  errorMessage         String?      @map("error_message")
+  createdAt            DateTime     @default(now()) @map("created_at")
+  rawLicenses          RawLicense[]
+
+  @@map("scrape_runs")
+}
+
+model RawLicense {
+  id              String            @id @default(cuid())
+  scrapeRunId     String            @map("scrape_run_id")
+  scrapeRun       ScrapeRun         @relation(fields: [scrapeRunId], references: [id], onDelete: Cascade)
+  county          String
+  licenseCategory String            @map("license_category")
+  licenseType     String            @map("license_type")
+  businessName    String            @map("business_name")
+  licenseeName    String            @map("licensee_name")
+  licenseNumber   String            @map("license_number")
+  licenseStatus   String            @map("license_status")
+  expirationDate  String?           @map("expiration_date")
+  addressLine1    String?           @map("address_line_1")
+  addressLine2    String?           @map("address_line_2")
+  city            String?
+  state           String?
+  zip             String?
+  sourceUrl       String?           @map("source_url")
+  sourcePage      Int?              @map("source_page")
+  scrapedAt       DateTime          @default(now()) @map("scraped_at")
+  rawHash         String            @map("raw_hash")
+  businessLicense BusinessLicense[]
+
+  @@unique([rawHash])
+  @@index([scrapeRunId])
+  @@index([licenseNumber])
+  @@map("raw_licenses")
+}
+
+model Business {
+  id                     String              @id @default(cuid())
+  normalizedBusinessName String              @map("normalized_business_name")
+  displayBusinessName    String              @map("display_business_name")
+  normalizedAddress      String?             @map("normalized_address")
+  county                 String?
+  primaryTrade           String?             @map("primary_trade")
+  latestLicenseStatus    String?             @map("latest_license_status")
+  canonicalLicenseNumber String?             @map("canonical_license_number")
+  firstSeenAt            DateTime            @default(now()) @map("first_seen_at")
+  lastSeenAt             DateTime            @default(now()) @map("last_seen_at")
+  businessLicenses       BusinessLicense[]
+  enrichment             BusinessEnrichment?
+  contacts               Contact[]
+  leadScore              LeadScore?
+
+  @@unique([normalizedBusinessName, normalizedAddress])
+  @@index([county])
+  @@index([primaryTrade])
+  @@map("businesses")
+}
+
+model BusinessLicense {
+  id             String     @id @default(cuid())
+  businessId     String     @map("business_id")
+  business       Business   @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  rawLicenseId   String     @map("raw_license_id")
+  rawLicense     RawLicense @relation(fields: [rawLicenseId], references: [id], onDelete: Cascade)
+  licenseType    String     @map("license_type")
+  licenseNumber  String     @map("license_number")
+  status         String
+  expirationDate String?    @map("expiration_date")
+
+  @@index([businessId])
+  @@map("business_licenses")
+}
+
+model EnrichmentRun {
+  id             String    @id @default(cuid())
+  triggeredBy    String    @default("manual") @map("triggered_by")
+  filterJson     Json?     @map("filter_json")
+  status         String    @default("pending")
+  totalSubmitted Int       @default(0) @map("total_submitted")
+  totalEnriched  Int       @default(0) @map("total_enriched")
+  totalFailed    Int       @default(0) @map("total_failed")
+  startedAt      DateTime? @map("started_at")
+  completedAt    DateTime? @map("completed_at")
+  errorMessage   String?   @map("error_message")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  @@map("enrichment_runs")
+}
+
+model BusinessEnrichment {
+  id                    String   @id @default(cuid())
+  businessId            String   @unique @map("business_id")
+  business              Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  apolloOrgId           String?  @map("apollo_org_id")
+  companyName           String?  @map("company_name")
+  domain                String?
+  website               String?
+  linkedinUrl           String?  @map("linkedin_url")
+  phone                 String?
+  employeeCount         Int?     @map("employee_count")
+  estimatedRevenue      String?  @map("estimated_revenue")
+  apolloMatchConfidence String?  @map("apollo_match_confidence")
+  enrichedAt            DateTime @default(now()) @map("enriched_at")
+
+  @@map("business_enrichment")
+}
+
+model Contact {
+  id              String      @id @default(cuid())
+  businessId      String      @map("business_id")
+  business        Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  firstName       String?     @map("first_name")
+  lastName        String?     @map("last_name")
+  fullName        String?     @map("full_name")
+  title           String?
+  seniority       String?
+  email           String?
+  phone           String?
+  linkedinUrl     String?     @map("linkedin_url")
+  emailStatus     String?     @map("email_status")
+  apolloContactId String?     @map("apollo_contact_id")
+  isPreferred     Boolean     @default(false) @map("is_preferred")
+  enrichedAt      DateTime    @default(now()) @map("enriched_at")
+  leadScores      LeadScore[] @relation("PrimaryContact")
+
+  @@index([businessId])
+  @@map("contacts")
+}
+
+model LeadScore {
+  id                 String   @id @default(cuid())
+  businessId         String   @unique @map("business_id")
+  business           Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  primaryContactId   String?  @map("primary_contact_id")
+  primaryContact     Contact? @relation("PrimaryContact", fields: [primaryContactId], references: [id])
+  score              Int      @default(0)
+  scoreBreakdownJson Json     @map("score_breakdown_json")
+  manualOverride     Int?     @map("manual_override")
+  scoredAt           DateTime @default(now()) @map("scored_at")
+
+  @@map("lead_scores")
+}
+
+model ExportRun {
+  id            String   @id @default(cuid())
+  filterJson    Json     @map("filter_json")
+  totalExported Int      @default(0) @map("total_exported")
+  filePath      String?  @map("file_path")
+  fileName      String?  @map("file_name")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@map("export_runs")
+}
