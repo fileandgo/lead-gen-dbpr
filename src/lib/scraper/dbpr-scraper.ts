@@ -352,23 +352,31 @@ async function deduplicateRecords(runId: string, county: string): Promise<number
     where: { scrapeRunId: runId },
   });
 
-  const uniqueBusinesses = new Map<string, typeof rawLicenses[0]>();
+  // Group all raw records by normalized business key (name + address)
+  // This keeps ALL licenses per business, not just the first
+  const businessGroups = new Map<string, typeof rawLicenses>();
 
   for (const raw of rawLicenses) {
     const normName = normalizeBusinessName(raw.businessName);
     const normAddr = normalizeAddress(raw.addressLine1 || '');
     const key = `${normName}::${normAddr}`;
 
-    if (!uniqueBusinesses.has(key)) {
-      uniqueBusinesses.set(key, raw);
+    if (!businessGroups.has(key)) {
+      businessGroups.set(key, []);
     }
+    businessGroups.get(key)!.push(raw);
   }
 
   let uniqueCount = 0;
 
-  for (const raw of Array.from(uniqueBusinesses.values())) {
-    const normName = normalizeBusinessName(raw.businessName);
-    const normAddr = normalizeAddress(raw.addressLine1 || '');
+  for (const records of Array.from(businessGroups.values())) {
+    // Use the first record for business-level info
+    const primary = records[0];
+    const normName = normalizeBusinessName(primary.businessName);
+    const normAddr = normalizeAddress(primary.addressLine1 || '');
+
+    // Prefer an active license as the primary trade
+    const activeRecord = records.find(r => r.licenseStatus?.includes('Active')) || primary;
 
     try {
       const business = await prisma.business.upsert({
@@ -380,35 +388,49 @@ async function deduplicateRecords(runId: string, county: string): Promise<number
         },
         update: {
           lastSeenAt: new Date(),
-          latestLicenseStatus: raw.licenseStatus,
-          primaryTrade: raw.licenseType,
-          canonicalLicenseNumber: raw.licenseNumber,
+          latestLicenseStatus: activeRecord.licenseStatus,
+          primaryTrade: activeRecord.licenseType,
+          canonicalLicenseNumber: activeRecord.licenseNumber,
         },
         create: {
           normalizedBusinessName: normName,
-          displayBusinessName: raw.businessName,
+          displayBusinessName: primary.businessName,
           normalizedAddress: normAddr,
           county: county,
-          primaryTrade: raw.licenseType,
-          latestLicenseStatus: raw.licenseStatus,
-          canonicalLicenseNumber: raw.licenseNumber,
+          primaryTrade: activeRecord.licenseType,
+          latestLicenseStatus: activeRecord.licenseStatus,
+          canonicalLicenseNumber: activeRecord.licenseNumber,
         },
       });
 
-      await prisma.businessLicense.create({
-        data: {
-          businessId: business.id,
-          rawLicenseId: raw.id,
-          licenseType: raw.licenseType,
-          licenseNumber: raw.licenseNumber,
-          status: raw.licenseStatus,
-          expirationDate: raw.expirationDate,
-        },
-      }).catch(() => {});
+      // Link ALL licenses for this business, not just the first
+      for (const raw of records) {
+        await prisma.businessLicense.upsert({
+          where: {
+            businessId_licenseNumber: {
+              businessId: business.id,
+              licenseNumber: raw.licenseNumber,
+            },
+          },
+          update: {
+            status: raw.licenseStatus,
+            expirationDate: raw.expirationDate,
+            rawLicenseId: raw.id,
+          },
+          create: {
+            businessId: business.id,
+            rawLicenseId: raw.id,
+            licenseType: raw.licenseType,
+            licenseNumber: raw.licenseNumber,
+            status: raw.licenseStatus,
+            expirationDate: raw.expirationDate,
+          },
+        }).catch(() => {});
+      }
 
       uniqueCount++;
     } catch (error) {
-      console.error(`[Scraper] Dedup error for ${raw.businessName}:`, error);
+      console.error(`[Scraper] Dedup error for ${primary.businessName}:`, error);
     }
   }
 

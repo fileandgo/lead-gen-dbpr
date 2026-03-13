@@ -85,6 +85,7 @@ model BusinessLicense {
   status         String
   expirationDate String?    @map("expiration_date")
 
+  @@unique([businessId, licenseNumber])
   @@index([businessId])
   @@map("business_licenses")
 }
