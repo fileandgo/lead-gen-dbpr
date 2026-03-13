@@ -12,142 +12,124 @@ interface ParsedRecord {
 }
 
 /**
- * Parse the HTML content of a DBPR search results page.
+ * Parse DBPR search results page HTML.
  *
- * The DBPR results page displays records in a table-like format:
- * - License Type | Name | Name Type | License Number | License Type/Rank | Status/Expires
- * - Below each record: Main Address and optionally License Location Address
+ * Each record consists of two table rows:
+ *  Row 1: License Type | Name (link) | Name Type (DBA/Primary) | LicenseNumber<br>Rank | Status<br>Date
+ *  Row 2: Address row with "Main Address*:" or "License Location Address*:" + full address
  *
- * This parser is designed to be resilient to minor HTML structure changes.
+ * DBPR license numbers follow the pattern: 2-3 letter prefix + 6-7 digits
+ * e.g., CBC1261841, CRC1335391, CGC1234567, CAC1234567, RB0012345
  */
 export function parseResultsPage(
   html: string,
-  county: string,
-  licenseType: string
+  _county: string,
+  _licenseType: string
 ): ParsedRecord[] {
   const records: ParsedRecord[] = [];
 
-  // Strategy 1: Parse table rows (most DBPR pages use tables)
-  const tableRecords = parseTableFormat(html);
-  if (tableRecords.length > 0) return tableRecords;
+  // Find all name links: <a href="LicenseDetail.asp?...">NAME</a>
+  const linkPattern = /<a\s+href="LicenseDetail\.asp[^"]*">\s*([^<]+?)\s*<\/a>/gi;
+  let linkMatch;
+  const linkPositions: { name: string; pos: number; endPos: number }[] = [];
 
-  // Strategy 2: Parse div-based layout
-  const divRecords = parseDivFormat(html);
-  if (divRecords.length > 0) return divRecords;
-
-  // Strategy 3: Regex-based fallback
-  return parseRegexFallback(html);
-}
-
-function parseTableFormat(html: string): ParsedRecord[] {
-  const records: ParsedRecord[] = [];
-
-  // DBPR typically uses a table with class or specific structure
-  // Each result block typically contains:
-  // - A row with license type, name, name type, license number, rank, status
-  // - Following row(s) with address info
-
-  // Find all result entries. DBPR wraps each license in a section with address below.
-  const entryPattern = /License\s+Type[^]*?(?=License\s+Type|Page\s+\d+\s+of|$)/gi;
-
-  // Alternative: split by common patterns in result rows
-  // Look for license number patterns (e.g., CRC1234567, CBC1234567, etc.)
-  const licenseNumberPattern = /([A-Z]{2,3}\d{5,7})/g;
-  const namePattern = /<a[^>]*>([^<]+)<\/a>/gi;
-
-  // Split HTML into result blocks
-  // DBPR results typically have each record separated by <hr> or table rows
-  const blocks = html.split(/<tr[^>]*class=["'][^"']*(?:result|data|row)[^"']*["'][^>]*>/i);
-
-  if (blocks.length <= 1) {
-    // Try splitting by horizontal rules or other delimiters
-    const altBlocks = html.split(/(?:<hr[^>]*>)|(?:<\/tr>\s*<tr[^>]*>)/i);
-    if (altBlocks.length > 1) {
-      return parseBlocksForRecords(altBlocks);
-    }
-  } else {
-    return parseBlocksForRecords(blocks);
+  while ((linkMatch = linkPattern.exec(html)) !== null) {
+    linkPositions.push({
+      name: linkMatch[1].trim(),
+      pos: linkMatch.index,
+      endPos: linkMatch.index + linkMatch[0].length,
+    });
   }
 
-  return records;
-}
+  if (linkPositions.length === 0) {
+    console.log('[Parser] No LicenseDetail links found');
+    return records;
+  }
 
-function parseDivFormat(html: string): ParsedRecord[] {
-  return []; // Placeholder for div-based parsing if needed
-}
+  console.log(`[Parser] Found ${linkPositions.length} license links`);
 
-function parseBlocksForRecords(blocks: string[]): ParsedRecord[] {
-  const records: ParsedRecord[] = [];
+  // DBPR license number pattern: 2-3 uppercase letters + 6-7 digits
+  // Prefixes: CBC, CRC, CGC, CAC, CMC, CPC, CPP, CCC, CFP, CSC, CUC,
+  //           RB, RG, RM, RP, RR, RS, RU, etc.
+  const licenseNumPattern = /\b(C[A-Z]{1,2}\d{6,7}|R[A-Z]\d{6,7}|P[A-Z]\d{6,7})\b/;
 
-  for (const block of blocks) {
-    // Skip blocks without license numbers
-    const licNumMatch = block.match(/([A-Z]{2,4}\d{4,8})/)
-      || block.match(/License\s*(?:Number|#|No\.?)\s*:?\s*([A-Z0-9]+)/i);
+  for (let i = 0; i < linkPositions.length; i++) {
+    const { name, endPos } = linkPositions[i];
 
+    // Get the HTML AFTER the name link up to the next record or 3000 chars
+    const nextPos = i + 1 < linkPositions.length ? linkPositions[i + 1].pos : endPos + 3000;
+    const afterLink = html.substring(endPos, Math.min(html.length, nextPos));
+
+    // Extract license number from the cell after the name link
+    // It appears in a <td> like: CBC1261841<br>Cert Building
+    const licNumMatch = afterLink.match(licenseNumPattern);
     if (!licNumMatch) continue;
-
     const licenseNumber = licNumMatch[1];
 
-    // Extract name - usually in a link or bold text
-    let name = '';
-    const nameMatch = block.match(/<a[^>]*>\s*([^<]+)\s*<\/a>/i)
-      || block.match(/<b>\s*([^<]+)\s*<\/b>/i)
-      || block.match(/<strong>\s*([^<]+)\s*<\/strong>/i);
-
-    if (nameMatch) {
-      name = nameMatch[1].trim();
-    }
-
-    if (!name || name.length < 2) continue;
-
-    // Extract status
+    // Extract status and expiration date
+    // Status cell content: "Current, Active<br>08/31/2026" or "Null and Void<br>08/31/2016"
     let status = 'Unknown';
-    const statusMatch = block.match(
-      /(?:Status\/Expires|Status)[^:]*:?\s*(?:<[^>]*>)*\s*([^<\n]+)/i
-    ) || block.match(
-      /(Current,\s*Active|Null\s+and\s+Void|Application\s+in\s+Progress|Eligible\s+for\s+Exam|Current|Delinquent)/i
-    );
-    if (statusMatch) {
-      status = statusMatch[1].trim();
-    }
-
-    // Extract expiration date
     let expirationDate: string | null = null;
-    const expMatch = status.match(/(\d{2}\/\d{2}\/\d{4})/);
-    if (expMatch) {
-      expirationDate = expMatch[1];
-      status = status.replace(expirationDate, '').replace(/,?\s*$/, '').trim();
+
+    const statusPattern = /(Current,?\s*Active|Null\s+and\s+Void|Application\s+in\s+Progress|Eligible\s+for\s+Exam|Current,?\s*Inactive|Delinquent|License\s+Authority\s+Voided|Revoked|Suspended)/i;
+    const statusMatch = afterLink.match(statusPattern);
+    if (statusMatch) {
+      status = statusMatch[1].replace(/,\s*$/, '').trim();
     }
 
-    // Extract address
+    // Find expiration date near the status
+    const dateMatch = afterLink.match(/(\d{2}\/\d{2}\/\d{4})/);
+    if (dateMatch) {
+      expirationDate = dateMatch[1];
+    }
+
+    // Extract address - look for "Main Address" or "License Location Address"
     let addressLine1: string | null = null;
     let city: string | null = null;
     let state: string | null = null;
     let zip: string | null = null;
 
-    const addressMatch = block.match(
-      /Main\s*Address[^:]*:?\s*(?:<[^>]*>)*\s*([^<\n]+)/i
+    const addrMatch = afterLink.match(
+      /(?:Main Address|License Location Address)[^<]*<\/b>\s*<\/span>\s*<\/font>\s*<\/td>\s*<td[^>]*>\s*<font[^>]*>\s*([^<]+)/i
     );
-    if (addressMatch) {
-      const fullAddr = addressMatch[1].trim();
+    if (addrMatch) {
+      const fullAddr = addrMatch[1].replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').trim();
       addressLine1 = fullAddr;
 
-      // Try to parse city, state, zip from address
-      const cityStateZip = fullAddr.match(/([A-Za-z\s]+),?\s*([A-Z]{2})\s*(\d{5}(?:-\d{4})?)/);
-      if (cityStateZip) {
-        city = cityStateZip[1].trim();
-        state = cityStateZip[2];
-        zip = cityStateZip[3];
+      // Parse city, state, zip from address like "16727 SW 135 AVE  ARCHER, FL 32618"
+      // Strategy: find the ", STATE ZIP" pattern at the end, then extract city before it
+      const stateZipMatch = fullAddr.match(/,\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)\s*$/);
+      if (stateZipMatch) {
+        state = stateZipMatch[1];
+        zip = stateZipMatch[2];
+
+        // City is the word(s) between double spaces and the comma
+        // "16727 SW 135 AVE  ARCHER, FL 32618" → ARCHER
+        const beforeStateZip = fullAddr.substring(0, fullAddr.lastIndexOf(',')).trim();
+        // Look for double-space separator between street and city
+        const dblSpaceIdx = beforeStateZip.lastIndexOf('  ');
+        if (dblSpaceIdx >= 0) {
+          city = beforeStateZip.substring(dblSpaceIdx).trim();
+        } else {
+          // Fallback: take the last word(s) that look like a city name
+          const parts = beforeStateZip.split(/\s+/);
+          // City is usually the last 1-3 words (e.g., "LAKE CITY", "FORT LAUDERDALE")
+          city = parts.slice(-2).join(' ');
+        }
+      } else {
+        // Try without comma: "STREET  CITY STATE ZIP"
+        const noCommaMatch = fullAddr.match(/\s{2,}([A-Z][A-Z\s]*?)\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)\s*$/);
+        if (noCommaMatch) {
+          city = noCommaMatch[1].trim();
+          state = noCommaMatch[2];
+          zip = noCommaMatch[3];
+        }
       }
     }
 
-    // Extract DBA name if present
-    const dbaMatch = block.match(/DBA[^:]*:?\s*([^<\n]+)/i);
-    const businessName = dbaMatch ? dbaMatch[1].trim() : name;
-
     records.push({
-      businessName: businessName || name,
-      licenseeName: name,
+      businessName: decodeHtmlEntities(name),
+      licenseeName: decodeHtmlEntities(name),
       licenseNumber,
       licenseStatus: status,
       expirationDate,
@@ -159,88 +141,16 @@ function parseBlocksForRecords(blocks: string[]): ParsedRecord[] {
     });
   }
 
+  console.log(`[Parser] Parsed ${records.length} records`);
   return records;
 }
 
-function parseRegexFallback(html: string): ParsedRecord[] {
-  const records: ParsedRecord[] = [];
-
-  // Strip HTML tags for text-based parsing
-  const text = html
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<[^>]+>/g, '\n')
-    .replace(/&nbsp;/g, ' ')
+function decodeHtmlEntities(text: string): string {
+  return text
     .replace(/&amp;/g, '&')
-    .replace(/\n{3,}/g, '\n\n');
-
-  // Find patterns: License number followed by name and status
-  const licensePattern = /([A-Z]{2,4}\d{4,8})/g;
-  let match;
-
-  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const licMatch = line.match(/([A-Z]{2,4}\d{4,8})/);
-
-    if (licMatch) {
-      // Look backward for a name
-      let name = '';
-      for (let j = i - 1; j >= Math.max(0, i - 5); j--) {
-        if (lines[j].length > 3 && !lines[j].match(/^(License|Name|Type|Main|Address|Status|Page)/i)) {
-          name = lines[j];
-          break;
-        }
-      }
-
-      // Look forward for status and address
-      let status = 'Unknown';
-      let address = '';
-
-      for (let j = i + 1; j < Math.min(lines.length, i + 8); j++) {
-        if (lines[j].match(/(Current|Active|Null|Void|Application|Eligible|Delinquent)/i)) {
-          status = lines[j];
-        }
-        if (lines[j].match(/Main\s*Address/i) && j + 1 < lines.length) {
-          address = lines[j + 1];
-        }
-      }
-
-      if (name) {
-        let expirationDate: string | null = null;
-        const expMatch = status.match(/(\d{2}\/\d{2}\/\d{4})/);
-        if (expMatch) {
-          expirationDate = expMatch[1];
-          status = status.replace(expirationDate, '').replace(/,?\s*$/, '').trim();
-        }
-
-        let city: string | null = null;
-        let state: string | null = null;
-        let zip: string | null = null;
-
-        const cityStateZip = address.match(/([A-Za-z\s]+),?\s*([A-Z]{2})\s*(\d{5}(?:-\d{4})?)/);
-        if (cityStateZip) {
-          city = cityStateZip[1].trim();
-          state = cityStateZip[2];
-          zip = cityStateZip[3];
-        }
-
-        records.push({
-          businessName: name,
-          licenseeName: name,
-          licenseNumber: licMatch[1],
-          licenseStatus: status,
-          expirationDate,
-          addressLine1: address || null,
-          addressLine2: null,
-          city,
-          state,
-          zip,
-        });
-      }
-    }
-  }
-
-  return records;
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ');
 }
