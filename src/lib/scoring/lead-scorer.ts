@@ -5,9 +5,11 @@ interface ScoreBreakdown {
   activeLicense: number;
   targetTrade: number;
   countyMatch: number;
+  googleResolved: number;
   companyMatched: number;
   domainPresent: number;
   preferredContact: number;
+  contactRankBonus: number;
   verifiedEmail: number;
   phoneFound: number;
 }
@@ -16,22 +18,25 @@ interface ScoreBreakdown {
  * Score a business lead out of 100 based on data completeness and quality.
  *
  * Scoring breakdown:
- * - Active license: 20 points
- * - Target trade (Construction Industry): 15 points
- * - County match (has county data): 10 points
- * - Company matched confidently via Apollo: 15 points
+ * - Active license: 15 points
+ * - Target trade (Construction Industry): 10 points
+ * - County match (has county data): 5 points
+ * - Google resolved (matched): 10 points
+ * - Company matched confidently via Apollo: 20 points
  * - Domain present: 10 points
- * - Preferred contact found: 15 points
+ * - Preferred contact found: 5 points
+ * - Owner-level contact bonus: 5 points
  * - Verified email found: 10 points
  * - Phone found: 5 points
  *
- * Total possible: 100 points
+ * Total possible: ~95 points (capped at 100)
  */
 export async function scoreBusiness(businessId: string): Promise<number> {
   const business = await prisma.business.findUnique({
     where: { id: businessId },
     include: {
       enrichment: true,
+      googleResolution: true,
       contacts: { where: { isPreferred: true }, take: 1 },
       businessLicenses: true,
     },
@@ -43,44 +48,58 @@ export async function scoreBusiness(businessId: string): Promise<number> {
     activeLicense: 0,
     targetTrade: 0,
     countyMatch: 0,
+    googleResolved: 0,
     companyMatched: 0,
     domainPresent: 0,
     preferredContact: 0,
+    contactRankBonus: 0,
     verifiedEmail: 0,
     phoneFound: 0,
   };
 
-  // Active license (20 pts)
+  // Active license (15 pts)
   const hasActiveLicense =
     business.latestLicenseStatus?.toLowerCase().includes('current') &&
     business.latestLicenseStatus?.toLowerCase().includes('active');
-  if (hasActiveLicense) breakdown.activeLicense = 20;
+  if (hasActiveLicense) breakdown.activeLicense = 15;
 
-  // Target trade (15 pts)
+  // Target trade (10 pts)
   if (
     business.primaryTrade &&
     TARGET_LICENSE_TYPES.includes(business.primaryTrade as any)
   ) {
-    breakdown.targetTrade = 15;
+    breakdown.targetTrade = 10;
   }
 
-  // County match (10 pts)
-  if (business.county) breakdown.countyMatch = 10;
+  // County match (5 pts)
+  if (business.county) breakdown.countyMatch = 5;
 
-  // Company matched confidently (15 pts)
+  // Google resolved (10 pts for matched, 3 for possible)
+  if (business.googleResolution?.matchStatus === 'matched') {
+    breakdown.googleResolved = 10;
+  } else if (business.googleResolution?.matchStatus === 'possible') {
+    breakdown.googleResolved = 3;
+  }
+
+  // Company matched confidently (20 pts)
   if (
     business.enrichment &&
     business.enrichment.apolloMatchConfidence !== 'none'
   ) {
-    breakdown.companyMatched = 15;
+    breakdown.companyMatched = 20;
   }
 
   // Domain present (10 pts)
   if (business.enrichment?.domain) breakdown.domainPresent = 10;
 
-  // Preferred contact found (15 pts)
+  // Preferred contact found (5 pts)
   const preferredContact = business.contacts[0];
-  if (preferredContact) breakdown.preferredContact = 15;
+  if (preferredContact) breakdown.preferredContact = 5;
+
+  // Contact rank bonus — owner-level contact (5 pts)
+  if (preferredContact?.titleBucket === 'owner') {
+    breakdown.contactRankBonus = 5;
+  }
 
   // Verified email (10 pts)
   if (preferredContact?.email) {

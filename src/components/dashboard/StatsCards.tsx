@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import type { DashboardStats } from '@/types';
-import { Building2, Sparkles, Mail, TrendingUp } from 'lucide-react';
+import { Building2, Sparkles, Mail, TrendingUp, AlertTriangle, XCircle } from 'lucide-react';
 
 export function StatsCards({ stats }: { stats: DashboardStats }) {
   const cards = [
@@ -19,7 +19,7 @@ export function StatsCards({ stats }: { stats: DashboardStats }) {
       title: 'Enriched',
       value: stats.enrichedBusinesses.toLocaleString(),
       icon: Sparkles,
-      description: 'Companies enriched via Apollo',
+      description: `${stats.partialBusinesses} partial, ${stats.failedBusinesses} failed`,
     },
     {
       title: 'Leads with Email',
@@ -52,6 +52,120 @@ export function StatsCards({ stats }: { stats: DashboardStats }) {
         ))}
       </div>
 
+      {/* Enrichment Errors */}
+      {stats.recentEnrichmentErrors.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-lg flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-amber-500" />
+              Enrichment Issues ({stats.partialBusinesses + stats.failedBusinesses})
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Business</TableHead>
+                  <TableHead>County</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Reason</TableHead>
+                  <TableHead>Date</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {stats.recentEnrichmentErrors.map((err) => (
+                  <TableRow key={err.id}>
+                    <TableCell className="font-medium">{err.businessName}</TableCell>
+                    <TableCell>{err.county || '-'}</TableCell>
+                    <TableCell>
+                      <Badge
+                        className={
+                          err.enrichmentStatus === 'failed'
+                            ? 'bg-red-100 text-red-800'
+                            : 'bg-amber-100 text-amber-800'
+                        }
+                        variant="secondary"
+                      >
+                        {err.enrichmentStatus === 'failed' ? (
+                          <><XCircle className="mr-1 h-3 w-3" />Error</>
+                        ) : (
+                          <><AlertTriangle className="mr-1 h-3 w-3" />No Match</>
+                        )}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="max-w-xs truncate text-sm text-muted-foreground">
+                      {err.errorReason || 'No details available'}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground text-sm">
+                      {new Date(err.enrichedAt).toLocaleDateString()}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Recent Enrichment Runs */}
+      {stats.recentEnrichmentRuns.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-lg">Recent Enrichment Runs</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Stage</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Submitted</TableHead>
+                  <TableHead>Enriched</TableHead>
+                  <TableHead>Failed</TableHead>
+                  <TableHead>Date</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {stats.recentEnrichmentRuns.map((run) => (
+                  <TableRow key={run.id}>
+                    <TableCell className="capitalize">{run.enrichmentStage}</TableCell>
+                    <TableCell>
+                      <Badge
+                        className={
+                          run.status === 'completed'
+                            ? 'bg-green-100 text-green-800'
+                            : run.status === 'running'
+                            ? 'bg-blue-100 text-blue-800'
+                            : run.status === 'failed'
+                            ? 'bg-red-100 text-red-800'
+                            : 'bg-yellow-100 text-yellow-800'
+                        }
+                        variant="secondary"
+                      >
+                        {run.status}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>{run.totalSubmitted}</TableCell>
+                    <TableCell>{run.totalEnriched}</TableCell>
+                    <TableCell>
+                      {run.totalFailed > 0 ? (
+                        <span className="text-red-600 font-medium">{run.totalFailed}</span>
+                      ) : (
+                        run.totalFailed
+                      )}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {new Date(run.createdAt).toLocaleDateString()}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Recent Scrape Runs */}
       <Card>
         <CardHeader>
           <CardTitle className="text-lg">Recent Scrape Runs</CardTitle>

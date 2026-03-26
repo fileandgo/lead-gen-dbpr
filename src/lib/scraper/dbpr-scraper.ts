@@ -171,10 +171,14 @@ async function fillSearchForm(page: Page, county: string, licenseType: string): 
   const formResult = await page.evaluate((args: { licenseType: string; county: string }) => {
     const results: string[] = [];
 
-    // License Type
+    // License Type (use startsWith for truncated DBPR option texts)
     const licTypeSel = document.querySelector('select[name="LicenseType"]') as HTMLSelectElement;
     if (licTypeSel) {
-      const match = Array.from(licTypeSel.options).find(o => o.text.trim() === args.licenseType);
+      const match = Array.from(licTypeSel.options).find(o => {
+        const optText = o.text.trim();
+        if (!optText) return false;
+        return optText === args.licenseType || args.licenseType.startsWith(optText);
+      });
       if (match) {
         licTypeSel.value = match.value;
         results.push(`LicenseType=${match.value}`);
@@ -230,9 +234,27 @@ async function submitSearch(page: Page): Promise<void> {
   const searchBtnSelector = 'button:has-text("Search"), input[value="Search"]';
 
   await page.locator(searchBtnSelector).first().click();
-  await page.waitForLoadState('networkidle', { timeout: 30000 });
+
+  // Wait for results to appear (look for "Page X of Y" or "No Records Found")
+  let loaded = false;
+  for (let attempt = 0; attempt < 30; attempt++) {
+    await sleep(1000);
+    try {
+      const text = await page.evaluate(() => document.body.innerText);
+      if (text.match(/Page\s+\d+\s+of\s+\d+/) || text.includes('No Records Found') || text.includes('0 Records')) {
+        loaded = true;
+        break;
+      }
+    } catch {
+      // Page might be navigating
+    }
+  }
+
+  if (!loaded) {
+    console.log('[Scraper] Warning: search results page did not load within 30s');
+  }
   console.log('[Scraper] Search submitted');
-  await sleep(2000);
+  await sleep(1000);
 }
 
 async function scrapeAllPages(
@@ -269,7 +291,7 @@ async function scrapeAllPages(
 
     console.log(`[Scraper] Parsed ${records.length} records on page ${currentPage}`);
 
-    // Save records to database
+    // Save all records to database (DBA + Primary) for data completeness
     for (const record of records) {
       const hash = hashRecord(
         `${record.licenseNumber}-${record.businessName}-${record.addressLine1}`
@@ -286,6 +308,7 @@ async function scrapeAllPages(
             licenseType,
             businessName: record.businessName,
             licenseeName: record.licenseeName,
+            nameType: record.nameType,
             licenseNumber: record.licenseNumber,
             licenseStatus: record.licenseStatus,
             expirationDate: record.expirationDate,
@@ -315,8 +338,6 @@ async function scrapeAllPages(
       console.log(`[Scraper] Reached page limit (500), stopping`);
       break;
     }
-
-    await sleep(1500);
   }
 
   return totalRecords;
@@ -326,25 +347,52 @@ async function navigateToNextPage(page: Page, _currentPage: number): Promise<boo
   // Check pagination info
   const pageText = await page.evaluate(() => document.body.innerText);
   const pageMatch = pageText.match(/Page\s+(\d+)\s+of\s+(\d+)/);
-  if (pageMatch) {
-    const current = parseInt(pageMatch[1]);
-    const total = parseInt(pageMatch[2]);
-    console.log(`[Scraper] Pagination: page ${current} of ${total}`);
-    if (current >= total) return false;
-  } else {
+  if (!pageMatch) {
+    console.log('[Scraper] Pagination: could not find "Page X of Y" text');
+    await captureScreenshot(page, 'pagination-no-match');
     return false;
   }
 
+  const current = parseInt(pageMatch[1]);
+  const total = parseInt(pageMatch[2]);
+  console.log(`[Scraper] Pagination: page ${current} of ${total}`);
+  if (current >= total) return false;
+
   // DBPR uses <button name="SearchForward" onclick="return ChangePage(4);"> for next page
   const forwardBtn = page.locator('button[name="SearchForward"]');
-  if (await forwardBtn.isVisible().catch(() => false)) {
-    await forwardBtn.click();
-    await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
-    await sleep(1500);
-    return true;
+  if (!(await forwardBtn.isVisible().catch(() => false))) {
+    console.log('[Scraper] Pagination: SearchForward button not visible');
+    await captureScreenshot(page, 'pagination-no-btn');
+    return false;
   }
 
-  return false;
+  await forwardBtn.click();
+
+  // Wait for the page number to actually change (poll instead of networkidle)
+  const expectedPage = String(current + 1);
+  let loaded = false;
+  for (let attempt = 0; attempt < 30; attempt++) {
+    await sleep(1000);
+    try {
+      const newText = await page.evaluate(() => document.body.innerText);
+      const newMatch = newText.match(/Page\s+(\d+)\s+of\s+(\d+)/);
+      if (newMatch && newMatch[1] === expectedPage) {
+        loaded = true;
+        break;
+      }
+    } catch {
+      // Page might be navigating, retry
+    }
+  }
+
+  if (!loaded) {
+    console.log(`[Scraper] Pagination: page did not advance to ${expectedPage} after 30s`);
+    await captureScreenshot(page, `pagination-stuck-${current}`);
+    return false;
+  }
+
+  await sleep(500);
+  return true;
 }
 
 async function deduplicateRecords(runId: string, county: string): Promise<number> {
@@ -352,31 +400,103 @@ async function deduplicateRecords(runId: string, county: string): Promise<number
     where: { scrapeRunId: runId },
   });
 
-  // Group all raw records by normalized business key (name + address)
-  // This keeps ALL licenses per business, not just the first
-  const businessGroups = new Map<string, typeof rawLicenses>();
-
+  // Step 1: Group raw records by license number to merge DBA + Primary pairs.
+  // DBPR returns two rows per license: one DBA (business name), one Primary (individual name).
+  // They share the same license number.
+  const byLicenseNum = new Map<string, typeof rawLicenses>();
   for (const raw of rawLicenses) {
-    const normName = normalizeBusinessName(raw.businessName);
-    const normAddr = normalizeAddress(raw.addressLine1 || '');
+    const key = raw.licenseNumber;
+    if (!byLicenseNum.has(key)) {
+      byLicenseNum.set(key, []);
+    }
+    byLicenseNum.get(key)!.push(raw);
+  }
+
+  // Step 2: For each license number, resolve DBA name, Primary (individual) name, and address.
+  interface MergedLicense {
+    displayName: string;       // DBA name (business name) — preferred for display
+    licenseeName: string | null; // Primary name (individual) — for person search
+    licenseNumber: string;
+    licenseType: string;
+    licenseStatus: string;
+    expirationDate: string | null;
+    addressLine1: string | null;
+    city: string | null;
+    state: string | null;
+    zip: string | null;
+    rawIds: string[];
+  }
+
+  const mergedLicenses: MergedLicense[] = [];
+
+  for (const [licNum, rows] of Array.from(byLicenseNum)) {
+    const dbaRow = rows.find(r => r.nameType === 'DBA');
+    const primaryRow = rows.find(r => r.nameType === 'Primary');
+    const fallbackRow = rows[0]; // For old data without nameType
+
+    // Only use DBA rows for display name; skip "." placeholder names
+    let displayName: string | null = null;
+    if (dbaRow && dbaRow.businessName !== '.' && dbaRow.businessName.trim() !== '') {
+      displayName = dbaRow.businessName;
+    } else if (!dbaRow && !primaryRow) {
+      // No nameType at all (old data) — use the name as-is
+      displayName = fallbackRow.businessName;
+    }
+
+    const licenseeName = primaryRow?.licenseeName || primaryRow?.businessName || null;
+
+    // If DBA name is blank/placeholder and only Primary exists, skip this license entirely
+    // User wants only businesses with real DBA names
+    if (!displayName) {
+      continue;
+    }
+
+    // Prefer address from DBA row, then Primary, then fallback
+    const addrRow = dbaRow || primaryRow || fallbackRow;
+    const statusRow = rows.find(r => r.licenseStatus?.includes('Active')) || fallbackRow;
+
+    mergedLicenses.push({
+      displayName,
+      licenseeName,
+      licenseNumber: licNum,
+      licenseType: statusRow.licenseType,
+      licenseStatus: statusRow.licenseStatus,
+      expirationDate: statusRow.expirationDate,
+      addressLine1: addrRow.addressLine1,
+      city: addrRow.city,
+      state: addrRow.state,
+      zip: addrRow.zip,
+      rawIds: rows.map(r => r.id),
+    });
+  }
+
+  // Step 3: Group merged licenses by normalized displayName + address for Business-level dedup.
+  // Multiple license types (CBC, CRC) for the same company become one Business.
+  const businessGroups = new Map<string, MergedLicense[]>();
+
+  for (const ml of mergedLicenses) {
+    const normName = normalizeBusinessName(ml.displayName);
+    const normAddr = normalizeAddress(ml.addressLine1 || '');
     const key = `${normName}::${normAddr}`;
 
     if (!businessGroups.has(key)) {
       businessGroups.set(key, []);
     }
-    businessGroups.get(key)!.push(raw);
+    businessGroups.get(key)!.push(ml);
   }
 
   let uniqueCount = 0;
 
-  for (const records of Array.from(businessGroups.values())) {
-    // Use the first record for business-level info
-    const primary = records[0];
-    const normName = normalizeBusinessName(primary.businessName);
-    const normAddr = normalizeAddress(primary.addressLine1 || '');
+  for (const licenses of Array.from(businessGroups.values())) {
+    const first = licenses[0];
+    const normName = normalizeBusinessName(first.displayName);
+    const normAddr = normalizeAddress(first.addressLine1 || '');
 
-    // Prefer an active license as the primary trade
-    const activeRecord = records.find(r => r.licenseStatus?.includes('Active')) || primary;
+    // Prefer an active license for the primary trade
+    const activeLic = licenses.find(l => l.licenseStatus?.includes('Active')) || first;
+
+    // Collect the licensee name from any license in the group
+    const licenseeName = licenses.find(l => l.licenseeName)?.licenseeName || null;
 
     try {
       const business = await prisma.business.upsert({
@@ -388,52 +508,63 @@ async function deduplicateRecords(runId: string, county: string): Promise<number
         },
         update: {
           lastSeenAt: new Date(),
-          latestLicenseStatus: activeRecord.licenseStatus,
-          primaryTrade: activeRecord.licenseType,
-          canonicalLicenseNumber: activeRecord.licenseNumber,
+          latestLicenseStatus: activeLic.licenseStatus,
+          primaryTrade: activeLic.licenseType,
+          canonicalLicenseNumber: activeLic.licenseNumber,
+          licenseeName,
+          city: first.city,
+          state: first.state,
+          zip: first.zip,
         },
         create: {
           normalizedBusinessName: normName,
-          displayBusinessName: primary.businessName,
+          displayBusinessName: first.displayName,
           normalizedAddress: normAddr,
-          county: county,
-          primaryTrade: activeRecord.licenseType,
-          latestLicenseStatus: activeRecord.licenseStatus,
-          canonicalLicenseNumber: activeRecord.licenseNumber,
+          county,
+          primaryTrade: activeLic.licenseType,
+          latestLicenseStatus: activeLic.licenseStatus,
+          canonicalLicenseNumber: activeLic.licenseNumber,
+          licenseeName,
+          city: first.city,
+          state: first.state,
+          zip: first.zip,
         },
       });
 
-      // Link ALL licenses for this business, not just the first
-      for (const raw of records) {
+      // Link ALL licenses for this business
+      for (const lic of licenses) {
+        // Pick any rawId to link (first one)
+        const rawId = lic.rawIds[0];
         await prisma.businessLicense.upsert({
           where: {
             businessId_licenseNumber: {
               businessId: business.id,
-              licenseNumber: raw.licenseNumber,
+              licenseNumber: lic.licenseNumber,
             },
           },
           update: {
-            status: raw.licenseStatus,
-            expirationDate: raw.expirationDate,
-            rawLicenseId: raw.id,
+            status: lic.licenseStatus,
+            expirationDate: lic.expirationDate,
+            rawLicenseId: rawId,
           },
           create: {
             businessId: business.id,
-            rawLicenseId: raw.id,
-            licenseType: raw.licenseType,
-            licenseNumber: raw.licenseNumber,
-            status: raw.licenseStatus,
-            expirationDate: raw.expirationDate,
+            rawLicenseId: rawId,
+            licenseType: lic.licenseType,
+            licenseNumber: lic.licenseNumber,
+            status: lic.licenseStatus,
+            expirationDate: lic.expirationDate,
           },
         }).catch(() => {});
       }
 
       uniqueCount++;
     } catch (error) {
-      console.error(`[Scraper] Dedup error for ${primary.businessName}:`, error);
+      console.error(`[Scraper] Dedup error for ${first.displayName}:`, error);
     }
   }
 
+  console.log(`[Scraper] Dedup: ${rawLicenses.length} raw → ${mergedLicenses.length} merged licenses → ${uniqueCount} businesses`);
   return uniqueCount;
 }
 

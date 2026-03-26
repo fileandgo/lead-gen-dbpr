@@ -11,8 +11,15 @@ export default function DashboardPage() {
 
   useEffect(() => {
     fetch('/api/dashboard')
-      .then((r) => r.json())
-      .then(setStats)
+      .then((r) => {
+        if (!r.ok) throw new Error(`Dashboard API error: ${r.status}`);
+        return r.json();
+      })
+      .then((data) => {
+        if (data && typeof data.totalBusinesses === 'number') {
+          setStats(data);
+        }
+      })
       .catch(console.error)
       .finally(() => setLoading(false));
   }, []);

@@ -40,6 +40,7 @@ model RawLicense {
   city            String?
   state           String?
   zip             String?
+  nameType        String?           @map("name_type")
   sourceUrl       String?           @map("source_url")
   sourcePage      Int?              @map("source_page")
   scrapedAt       DateTime          @default(now()) @map("scraped_at")
@@ -61,12 +62,24 @@ model Business {
   primaryTrade           String?             @map("primary_trade")
   latestLicenseStatus    String?             @map("latest_license_status")
   canonicalLicenseNumber String?             @map("canonical_license_number")
+  licenseeName           String?             @map("licensee_name")
+  city                   String?
+  state                  String?
+  zip                    String?
+  excluded               Boolean             @default(false)
+  excludedAt             DateTime?           @map("excluded_at")
+  lastExportedAt         DateTime?           @map("last_exported_at")
+  exportCount            Int                 @default(0) @map("export_count")
+  source                 String              @default("dbpr_scrape")
+  importRunId            String?             @map("import_run_id")
+  importRun              ImportRun?          @relation(fields: [importRunId], references: [id])
   firstSeenAt            DateTime            @default(now()) @map("first_seen_at")
   lastSeenAt             DateTime            @default(now()) @map("last_seen_at")
   businessLicenses       BusinessLicense[]
   enrichment             BusinessEnrichment?
   contacts               Contact[]
   leadScore              LeadScore?
+  googleResolution       GoogleResolution?
 
   @@unique([normalizedBusinessName, normalizedAddress])
   @@index([county])
@@ -101,7 +114,10 @@ model EnrichmentRun {
   startedAt      DateTime? @map("started_at")
   completedAt    DateTime? @map("completed_at")
   errorMessage   String?   @map("error_message")
-  createdAt      DateTime  @default(now()) @map("created_at")
+  enrichmentStage  String   @default("full") @map("enrichment_stage")
+  businessIds      Json?    @map("business_ids_json")
+  enrichmentConfig Json?    @map("enrichment_config")
+  createdAt        DateTime @default(now()) @map("created_at")
 
   @@map("enrichment_runs")
 }
@@ -119,6 +135,10 @@ model BusinessEnrichment {
   employeeCount         Int?     @map("employee_count")
   estimatedRevenue      String?  @map("estimated_revenue")
   apolloMatchConfidence String?  @map("apollo_match_confidence")
+  enrichmentStatus      String   @default("completed") @map("enrichment_status")
+  errorReason           String?  @map("error_reason")
+  enrichmentStrategy    String?  @map("enrichment_strategy")
+  webhookPending        Boolean  @default(false) @map("webhook_pending")
   enrichedAt            DateTime @default(now()) @map("enriched_at")
 
   @@map("business_enrichment")
@@ -137,9 +157,12 @@ model Contact {
   phone           String?
   linkedinUrl     String?     @map("linkedin_url")
   emailStatus     String?     @map("email_status")
-  apolloContactId String?     @map("apollo_contact_id")
-  isPreferred     Boolean     @default(false) @map("is_preferred")
-  enrichedAt      DateTime    @default(now()) @map("enriched_at")
+  apolloContactId    String?     @map("apollo_contact_id")
+  isPreferred        Boolean     @default(false) @map("is_preferred")
+  contactRankScore   Int?        @map("contact_rank_score")
+  contactRankReasons Json?       @map("contact_rank_reasons")
+  titleBucket        String?     @map("title_bucket")
+  enrichedAt         DateTime    @default(now()) @map("enriched_at")
   leadScores      LeadScore[] @relation("PrimaryContact")
 
   @@index([businessId])
@@ -169,4 +192,73 @@ model ExportRun {
   createdAt     DateTime @default(now()) @map("created_at")
 
   @@map("export_runs")
+}
+
+model ImportRun {
+  id                String     @id @default(cuid())
+  fileName          String     @map("file_name")
+  fileType          String     @map("file_type")
+  status            String     @default("pending")
+  totalRows         Int        @default(0) @map("total_rows")
+  validRows         Int        @default(0) @map("valid_rows")
+  importedRows      Int        @default(0) @map("imported_rows")
+  skippedDuplicates Int        @default(0) @map("skipped_duplicates")
+  updatedExisting   Int        @default(0) @map("updated_existing")
+  errorRows         Int        @default(0) @map("error_rows")
+  duplicateStrategy String     @default("skip") @map("duplicate_strategy")
+  columnMappingJson Json       @map("column_mapping_json")
+  errorsJson        Json?      @map("errors_json")
+  startedAt         DateTime?  @map("started_at")
+  completedAt       DateTime?  @map("completed_at")
+  errorMessage      String?    @map("error_message")
+  createdAt         DateTime   @default(now()) @map("created_at")
+  businesses        Business[]
+
+  @@map("import_runs")
+}
+
+model GoogleResolution {
+  id                String   @id @default(cuid())
+  businessId        String   @unique @map("business_id")
+  business          Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  resolvedName      String?  @map("resolved_name")
+  resolvedDomain    String?  @map("resolved_domain")
+  resolvedWebsite   String?  @map("resolved_website")
+  resolvedPhone     String?  @map("resolved_phone")
+  resolvedAddress   String?  @map("resolved_address")
+  googlePlaceId     String?  @map("google_place_id")
+  matchStatus       String   @default("pending") @map("match_status")
+  confidence        Float?
+  searchQuery       String?  @map("search_query")
+  errorReason       String?  @map("error_reason")
+  resolvedAt        DateTime @default(now()) @map("resolved_at")
+
+  @@map("google_resolutions")
+}
+
+model GoogleResolutionRun {
+  id               String    @id @default(cuid())
+  triggeredBy      String    @default("auto") @map("triggered_by")
+  status           String    @default("pending")
+  totalSubmitted   Int       @default(0) @map("total_submitted")
+  totalMatched     Int       @default(0) @map("total_matched")
+  totalPossible    Int       @default(0) @map("total_possible")
+  totalNoMatch     Int       @default(0) @map("total_no_match")
+  totalFailed      Int       @default(0) @map("total_failed")
+  businessIds      Json?     @map("business_ids_json")
+  startedAt        DateTime? @map("started_at")
+  completedAt      DateTime? @map("completed_at")
+  errorMessage     String?   @map("error_message")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  @@map("google_resolution_runs")
+}
+
+model AppSetting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  @@map("app_settings")
 }

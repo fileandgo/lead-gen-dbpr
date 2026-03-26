@@ -1,11 +1,13 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import type { ScrapeRunSummary } from '@/types';
 import { formatDate } from '@/lib/utils';
+import { RotateCw } from 'lucide-react';
 
 function getStatusColor(status: string) {
   switch (status) {
@@ -18,6 +20,36 @@ function getStatusColor(status: string) {
     default:
       return 'bg-yellow-100 text-yellow-800';
   }
+}
+
+function RerunButton({ run }: { run: ScrapeRunSummary }) {
+  const [loading, setLoading] = useState(false);
+
+  const handleRerun = async () => {
+    const types = Array.isArray(run.selectedLicenseTypes) ? run.selectedLicenseTypes : [];
+    if (!run.county || types.length === 0) return;
+
+    setLoading(true);
+    try {
+      await fetch('/api/scrape', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ county: run.county, licenseTypes: types }),
+      });
+    } catch {
+      // History auto-refreshes, error will show there
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (run.status === 'pending' || run.status === 'running') return null;
+
+  return (
+    <Button variant="ghost" size="sm" onClick={handleRerun} disabled={loading} title="Re-run this search">
+      <RotateCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+    </Button>
+  );
 }
 
 export function ScrapeHistory({ runs, loading }: { runs: ScrapeRunSummary[]; loading: boolean }) {
@@ -45,6 +77,7 @@ export function ScrapeHistory({ runs, loading }: { runs: ScrapeRunSummary[]; loa
                 <TableHead>Started</TableHead>
                 <TableHead>Completed</TableHead>
                 <TableHead>Error</TableHead>
+                <TableHead className="w-[50px]"></TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -84,6 +117,9 @@ export function ScrapeHistory({ runs, loading }: { runs: ScrapeRunSummary[]; loa
                     </TableCell>
                     <TableCell className="max-w-[200px] truncate text-xs text-red-600">
                       {run.errorMessage || '-'}
+                    </TableCell>
+                    <TableCell>
+                      <RerunButton run={run} />
                     </TableCell>
                   </TableRow>
                 );

@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
@@ -10,31 +10,51 @@ import {
   Users,
   Download,
   Database,
+  Upload,
 } from 'lucide-react';
 
 const navItems = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/search', label: 'Search & Scrape', icon: Search },
+  { href: '/import', label: 'Import', icon: Upload },
   { href: '/leads', label: 'Leads', icon: Users },
   { href: '/exports', label: 'Exports', icon: Download },
 ];
 
 export function Sidebar() {
   const pathname = usePathname();
+  const [navigatingTo, setNavigatingTo] = useState<string | null>(null);
+
+  // Clear loading state when pathname changes (navigation complete)
+  useEffect(() => {
+    setNavigatingTo(null);
+  }, [pathname]);
+
+  const handleNavClick = useCallback(
+    (href: string) => {
+      const isActive = pathname === href || pathname.startsWith(href + '/');
+      if (!isActive) {
+        setNavigatingTo(href);
+      }
+    },
+    [pathname]
+  );
 
   return (
     <aside className="flex h-screen w-64 flex-col border-r bg-card">
       <div className="flex h-16 items-center gap-2 border-b px-6">
         <Database className="h-6 w-6 text-primary" />
-        <span className="text-lg font-bold">DBPR Lead Gen</span>
+        <span className="text-lg font-bold">Novia Lead Manager</span>
       </div>
       <nav className="flex-1 space-y-1 p-4">
         {navItems.map((item) => {
           const isActive = pathname === item.href || pathname.startsWith(item.href + '/');
+          const isLoading = navigatingTo === item.href;
           return (
             <Link
               key={item.href}
               href={item.href}
+              onClick={() => handleNavClick(item.href)}
               className={cn(
                 'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
                 isActive
@@ -42,14 +62,18 @@ export function Sidebar() {
                   : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
               )}
             >
-              <item.icon className="h-4 w-4" />
+              {isLoading ? (
+                <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+              ) : (
+                <item.icon className="h-4 w-4" />
+              )}
               {item.label}
             </Link>
           );
         })}
       </nav>
       <div className="border-t p-4">
-        <p className="text-xs text-muted-foreground">Internal Tool v1.0</p>
+        <p className="text-xs text-muted-foreground">Novia Lead Manager v1.0</p>
       </div>
     </aside>
   );

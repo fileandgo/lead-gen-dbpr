@@ -13,6 +13,7 @@ export async function GET(
           include: { rawLicense: true },
         },
         enrichment: true,
+        googleResolution: true,
         contacts: { orderBy: { isPreferred: 'desc' } },
         leadScore: true,
       },
@@ -28,9 +29,14 @@ export async function GET(
       normalizedBusinessName: business.normalizedBusinessName,
       normalizedAddress: business.normalizedAddress,
       county: business.county,
+      licenseeName: business.licenseeName,
+      city: business.city,
+      state: business.state,
+      zip: business.zip,
       primaryTrade: business.primaryTrade,
       latestLicenseStatus: business.latestLicenseStatus,
       canonicalLicenseNumber: business.canonicalLicenseNumber,
+      excluded: business.excluded,
       firstSeenAt: business.firstSeenAt.toISOString(),
       lastSeenAt: business.lastSeenAt.toISOString(),
       licenses: business.businessLicenses.map((bl) => ({
@@ -40,6 +46,19 @@ export async function GET(
         status: bl.status,
         expirationDate: bl.expirationDate,
       })),
+      googleResolution: business.googleResolution
+        ? {
+            resolvedName: business.googleResolution.resolvedName,
+            resolvedDomain: business.googleResolution.resolvedDomain,
+            resolvedWebsite: business.googleResolution.resolvedWebsite,
+            resolvedPhone: business.googleResolution.resolvedPhone,
+            resolvedAddress: business.googleResolution.resolvedAddress,
+            matchStatus: business.googleResolution.matchStatus,
+            confidence: business.googleResolution.confidence,
+            searchQuery: business.googleResolution.searchQuery,
+            resolvedAt: business.googleResolution.resolvedAt.toISOString(),
+          }
+        : null,
       enrichment: business.enrichment
         ? {
             companyName: business.enrichment.companyName,
@@ -50,6 +69,9 @@ export async function GET(
             employeeCount: business.enrichment.employeeCount,
             estimatedRevenue: business.enrichment.estimatedRevenue,
             apolloMatchConfidence: business.enrichment.apolloMatchConfidence,
+            enrichmentStrategy: business.enrichment.enrichmentStrategy,
+            enrichmentStatus: business.enrichment.enrichmentStatus,
+            errorReason: business.enrichment.errorReason,
             enrichedAt: business.enrichment.enrichedAt.toISOString(),
           }
         : null,
@@ -64,6 +86,9 @@ export async function GET(
         linkedinUrl: c.linkedinUrl,
         emailStatus: c.emailStatus,
         isPreferred: c.isPreferred,
+        contactRankScore: c.contactRankScore,
+        titleBucket: c.titleBucket,
+        contactRankReasons: c.contactRankReasons as string[] | null,
       })),
       score: business.leadScore
         ? {

@@ -29,7 +29,9 @@ export async function POST(req: NextRequest) {
   try {
     const filters = await req.json();
 
-    const where: Prisma.BusinessWhereInput = {};
+    const where: Prisma.BusinessWhereInput = {
+      excluded: false,
+    };
     if (filters.county) where.county = filters.county;
     if (filters.trade) where.primaryTrade = filters.trade;
     if (filters.activeOnly || filters.status === 'active') {
@@ -73,6 +75,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Filter by title bucket if specified
+    if (filters.titleMode && filters.titleMode !== 'mixed') {
+      filtered = filtered.filter((b) =>
+        b.contacts.some((c) => (c as any).titleBucket === filters.titleMode)
+      );
+    }
+
     const csv = generateCSV(filtered);
     const fileName = `leads-export-${new Date().toISOString().split('T')[0]}.csv`;
 
@@ -83,6 +92,18 @@ export async function POST(req: NextRequest) {
         fileName,
       },
     });
+
+    // Track export on each business
+    const exportedIds = filtered.map((b) => b.id);
+    if (exportedIds.length > 0) {
+      await prisma.business.updateMany({
+        where: { id: { in: exportedIds } },
+        data: {
+          lastExportedAt: new Date(),
+          exportCount: { increment: 1 },
+        },
+      });
+    }
 
     return NextResponse.json({ csv, fileName, totalExported: filtered.length });
   } catch (error) {

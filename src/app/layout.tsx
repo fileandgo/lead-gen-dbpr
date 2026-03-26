@@ -5,8 +5,8 @@ import './globals.css';
 const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
-  title: 'DBPR Lead Gen',
-  description: 'Internal lead generation tool for Florida DBPR contractor licenses',
+  title: 'Novia Lead Manager',
+  description: 'Internal lead management platform',
 };
 
 export default function RootLayout({

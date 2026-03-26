@@ -1,6 +1,7 @@
 interface ParsedRecord {
   businessName: string;
   licenseeName: string;
+  nameType: 'DBA' | 'Primary' | null;
   licenseNumber: string;
   licenseStatus: string;
   expirationDate: string | null;
@@ -59,6 +60,16 @@ export function parseResultsPage(
     // Get the HTML AFTER the name link up to the next record or 3000 chars
     const nextPos = i + 1 < linkPositions.length ? linkPositions[i + 1].pos : endPos + 3000;
     const afterLink = html.substring(endPos, Math.min(html.length, nextPos));
+
+    // Extract Name Type (DBA or Primary) from the <td> cell after the name link
+    // HTML: <font ...>DBA</font> or <font ...>Primary</font>
+    let nameType: 'DBA' | 'Primary' | null = null;
+    const nameTypeMatch = afterLink.match(/>(DBA|Primary)<\/font>/i);
+    if (nameTypeMatch) {
+      const raw = nameTypeMatch[1].toUpperCase();
+      if (raw === 'DBA') nameType = 'DBA';
+      else if (raw === 'PRIMARY') nameType = 'Primary';
+    }
 
     // Extract license number from the cell after the name link
     // It appears in a <td> like: CBC1261841<br>Cert Building
@@ -130,6 +141,7 @@ export function parseResultsPage(
     records.push({
       businessName: decodeHtmlEntities(name),
       licenseeName: decodeHtmlEntities(name),
+      nameType,
       licenseNumber,
       licenseStatus: status,
       expirationDate,

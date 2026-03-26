@@ -17,6 +17,7 @@ interface CSVRow {
   last_name: string;
   email: string;
   company_name: string;
+  licensee_name: string;
   title: string;
   county: string;
   city: string;
@@ -25,6 +26,8 @@ interface CSVRow {
   score: string;
   website: string;
   phone: string;
+  linkedin: string;
+  company_linkedin: string;
   source_url: string;
 }
 
@@ -44,14 +47,17 @@ export function generateCSV(businesses: BusinessWithRelations[]): string {
       last_name: contact?.lastName || '',
       email: contact?.email || '',
       company_name: business.displayBusinessName,
+      licensee_name: business.licenseeName || '',
       title: contact?.title || '',
       county: business.county || '',
-      city: '',
+      city: business.city || '',
       trade: business.primaryTrade || '',
       license_status: business.latestLicenseStatus || '',
       score: String(score),
       website: business.enrichment?.website || business.enrichment?.domain || '',
       phone: contact?.phone || business.enrichment?.phone || '',
+      linkedin: contact?.linkedinUrl || '',
+      company_linkedin: business.enrichment?.linkedinUrl || '',
       source_url: `https://www.myfloridalicense.com`,
     });
   }
@@ -79,8 +85,10 @@ export function generateExcel(businesses: BusinessWithRelations[]): Buffer | nul
         'Last Name': contact?.lastName || '',
         'Email': contact?.email || '',
         'Company Name': business.displayBusinessName,
+        'Licensee Name': business.licenseeName || '',
         'Title': contact?.title || '',
         'County': business.county || '',
+        'City': business.city || '',
         'Trade': business.primaryTrade || '',
         'License Status': business.latestLicenseStatus || '',
         'Score': score,
